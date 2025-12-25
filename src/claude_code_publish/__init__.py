@@ -14,8 +14,21 @@ from pathlib import Path
 import click
 from click_default_group import DefaultGroup
 import httpx
+from jinja2 import Environment, PackageLoader
 import markdown
 import questionary
+
+# Set up Jinja2 environment
+_jinja_env = Environment(
+    loader=PackageLoader("claude_code_publish", "templates"),
+    autoescape=False,  # We handle escaping manually in render functions
+)
+
+
+def get_template(name):
+    """Get a Jinja2 template by name."""
+    return _jinja_env.get_template(name)
+
 
 # Regex to match git commit output: [branch hash] message
 COMMIT_PATTERN = re.compile(r"\[[\w\-/]+ ([a-f0-9]{7,})\] (.+?)(?:\n|$)")
@@ -801,24 +814,15 @@ def generate_html(json_path, output_dir, github_repo=None):
                     messages_html.append(msg_html)
                 is_first = False
         pagination_html = generate_pagination_html(page_num, total_pages)
-        page_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Code transcript - page {page_num}</title>
-    <style>{CSS}</style>
-</head>
-<body>
-    <div class="container">
-        <h1><a href="index.html" style="color: inherit; text-decoration: none;">Claude Code transcript</a> - page {page_num}/{total_pages}</h1>
-        {pagination_html}
-        {''.join(messages_html)}
-        {pagination_html}
-    </div>
-    <script>{JS}</script>
-</body>
-</html>"""
+        page_template = get_template("page.html")
+        page_content = page_template.render(
+            css=CSS,
+            js=JS,
+            page_num=page_num,
+            total_pages=total_pages,
+            pagination_html=pagination_html,
+            messages_html="".join(messages_html),
+        )
         (output_dir / f"page-{page_num:03d}.html").write_text(page_content)
         print(f"Generated page-{page_num:03d}.html")
 
@@ -894,25 +898,18 @@ def generate_html(json_path, output_dir, github_repo=None):
     index_items = [item[2] for item in timeline_items]
 
     index_pagination = generate_index_pagination_html(total_pages)
-    index_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Code transcript - Index</title>
-    <style>{CSS}</style>
-</head>
-<body>
-    <div class="container">
-        <h1>Claude Code transcript</h1>
-        {index_pagination}
-        <p style="color: var(--text-muted); margin-bottom: 24px;">{prompt_num} prompts · {total_messages} messages · {total_tool_calls} tool calls · {total_commits} commits · {total_pages} pages</p>
-        {''.join(index_items)}
-        {index_pagination}
-    </div>
-    <script>{JS}</script>
-</body>
-</html>"""
+    index_template = get_template("index.html")
+    index_content = index_template.render(
+        css=CSS,
+        js=JS,
+        pagination_html=index_pagination,
+        prompt_num=prompt_num,
+        total_messages=total_messages,
+        total_tool_calls=total_tool_calls,
+        total_commits=total_commits,
+        total_pages=total_pages,
+        index_items_html="".join(index_items),
+    )
     index_path = output_dir / "index.html"
     index_path.write_text(index_content)
     print(
@@ -1143,24 +1140,15 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
                     messages_html.append(msg_html)
                 is_first = False
         pagination_html = generate_pagination_html(page_num, total_pages)
-        page_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Code transcript - page {page_num}</title>
-    <style>{CSS}</style>
-</head>
-<body>
-    <div class="container">
-        <h1><a href="index.html" style="color: inherit; text-decoration: none;">Claude Code transcript</a> - page {page_num}/{total_pages}</h1>
-        {pagination_html}
-        {''.join(messages_html)}
-        {pagination_html}
-    </div>
-    <script>{JS}</script>
-</body>
-</html>"""
+        page_template = get_template("page.html")
+        page_content = page_template.render(
+            css=CSS,
+            js=JS,
+            page_num=page_num,
+            total_pages=total_pages,
+            pagination_html=pagination_html,
+            messages_html="".join(messages_html),
+        )
         (output_dir / f"page-{page_num:03d}.html").write_text(page_content)
         click.echo(f"Generated page-{page_num:03d}.html")
 
@@ -1236,25 +1224,18 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     index_items = [item[2] for item in timeline_items]
 
     index_pagination = generate_index_pagination_html(total_pages)
-    index_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Code transcript - Index</title>
-    <style>{CSS}</style>
-</head>
-<body>
-    <div class="container">
-        <h1>Claude Code transcript</h1>
-        {index_pagination}
-        <p style="color: var(--text-muted); margin-bottom: 24px;">{prompt_num} prompts · {total_messages} messages · {total_tool_calls} tool calls · {total_commits} commits · {total_pages} pages</p>
-        {''.join(index_items)}
-        {index_pagination}
-    </div>
-    <script>{JS}</script>
-</body>
-</html>"""
+    index_template = get_template("index.html")
+    index_content = index_template.render(
+        css=CSS,
+        js=JS,
+        pagination_html=index_pagination,
+        prompt_num=prompt_num,
+        total_messages=total_messages,
+        total_tool_calls=total_tool_calls,
+        total_commits=total_commits,
+        total_pages=total_pages,
+        index_items_html="".join(index_items),
+    )
     index_path = output_dir / "index.html"
     index_path.write_text(index_content)
     click.echo(
