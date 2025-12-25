@@ -922,22 +922,11 @@ def generate_html(json_path, output_dir, github_repo=None):
 
 
 @click.group(cls=DefaultGroup, default="session", default_if_no_args=False)
-@click.option(
+@click.version_option(
+    importlib.metadata.version("claude-code-publish"),
     "-v",
     "--version",
-    is_flag=True,
-    callback=lambda ctx, param, value: (
-        ctx.exit(
-            click.echo(
-                f"claude-code-publish, version {importlib.metadata.version('claude-code-publish')}"
-            )
-        )
-        if value
-        else None
-    ),
-    expose_value=False,
-    is_eager=True,
-    help="Show the version and exit.",
+    prog_name="claude-code-publish",
 )
 def cli():
     """Convert Claude Code session JSON to mobile-friendly HTML pages."""
