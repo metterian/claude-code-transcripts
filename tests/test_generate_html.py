@@ -876,25 +876,29 @@ class TestVersionOption:
 
     def test_version_long_flag(self):
         """Test that --version shows version info."""
+        import importlib.metadata
         from click.testing import CliRunner
         from claude_code_publish import cli
 
         runner = CliRunner()
         result = runner.invoke(cli, ["--version"])
 
+        expected_version = importlib.metadata.version("claude-code-publish")
         assert result.exit_code == 0
-        assert "0.2" in result.output
+        assert expected_version in result.output
 
     def test_version_short_flag(self):
         """Test that -v shows version info."""
+        import importlib.metadata
         from click.testing import CliRunner
         from claude_code_publish import cli
 
         runner = CliRunner()
         result = runner.invoke(cli, ["-v"])
 
+        expected_version = importlib.metadata.version("claude-code-publish")
         assert result.exit_code == 0
-        assert "0.2" in result.output
+        assert expected_version in result.output
 
 
 class TestOpenOption:
