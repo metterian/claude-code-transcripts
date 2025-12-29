@@ -852,6 +852,37 @@ def is_tool_result_message(message_data):
     )
 
 
+def extract_markdown_content(message_data, log_type):
+    """Extract markdown/text content from a message for copying."""
+    content = message_data.get("content", "")
+    if log_type == "user":
+        if isinstance(content, str):
+            if not is_json_like(content):
+                return content, "Copy Markdown", None
+            return None, "Copy JSON", ".message-content pre"
+        elif isinstance(content, list):
+            # Check for tool results (use selector) or text (use content)
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "tool_result":
+                        return None, "Copy text", ".message-content"
+                    if block.get("type") == "text":
+                        text = block.get("text", "")
+                        if text and not is_json_like(text):
+                            return text, "Copy Markdown", None
+            return None, "Copy text", ".message-content"
+    elif log_type == "assistant":
+        # For assistant messages, extract text blocks
+        if isinstance(content, list):
+            texts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+            if texts:
+                return "\n\n".join(texts), "Copy Markdown", None
+    return None, "Copy text", ".message-content"
+
+
 def render_message(log_type, message_json, timestamp):
     if not message_json:
         return ""
@@ -874,7 +905,19 @@ def render_message(log_type, message_json, timestamp):
     if not content_html.strip():
         return ""
     msg_id = make_msg_id(timestamp)
-    return _macros.message(role_class, role_label, msg_id, timestamp, content_html)
+    copy_content, copy_label, copy_from = extract_markdown_content(
+        message_data, log_type
+    )
+    return _macros.message(
+        role_class,
+        role_label,
+        msg_id,
+        timestamp,
+        content_html,
+        copy_label=copy_label,
+        copy_content=copy_content,
+        copy_from=copy_from,
+    )
 
 
 CSS = """
@@ -893,6 +936,7 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; padding-bottom: 8px; border-bottom:
 .tool-reply .tool-result { background: transparent; padding: 0; margin: 0; }
 .tool-reply .tool-result .truncatable.truncated::after { background: linear-gradient(to bottom, transparent, #fff8e1); }
 .message-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; background: rgba(0,0,0,0.03); font-size: 0.85rem; }
+.header-actions { display: flex; align-items: center; gap: 8px; }
 .role-label { font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
 .user .role-label { color: var(--user-border); }
 time { color: var(--text-muted); font-size: 0.8rem; }
@@ -977,6 +1021,7 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 .index-item a { display: block; text-decoration: none; color: inherit; }
 .index-item a:hover { background: rgba(25, 118, 210, 0.1); }
 .index-item-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; background: rgba(0,0,0,0.03); font-size: 0.85rem; }
+.index-item-header .header-actions { display: flex; align-items: center; gap: 8px; }
 .index-item-number { font-weight: 600; color: var(--user-border); }
 .index-item-content { padding: 16px; }
 .index-item-stats { padding: 8px 16px 12px 32px; font-size: 0.85rem; color: var(--text-muted); border-top: 1px solid rgba(0,0,0,0.06); }
@@ -1010,13 +1055,55 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 .search-result { margin-bottom: 16px; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 .search-result a { display: block; text-decoration: none; color: inherit; }
 .search-result a:hover { background: rgba(25, 118, 210, 0.05); }
-.search-result-page { padding: 6px 12px; background: rgba(0,0,0,0.03); font-size: 0.8rem; color: var(--text-muted); border-bottom: 1px solid rgba(0,0,0,0.06); }
+.search-result-header { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: rgba(0,0,0,0.03); border-bottom: 1px solid rgba(0,0,0,0.06); }
+.search-result-page { font-size: 0.8rem; color: var(--text-muted); text-decoration: none; }
+.search-result-page:hover { text-decoration: underline; }
 .search-result-content { padding: 12px; }
 .search-result mark { background: #fff59d; padding: 1px 2px; border-radius: 2px; }
+copy-button { display: inline-block; margin-right: 8px; }
+copy-button button { background: transparent; border: 1px solid var(--text-muted); border-radius: 4px; padding: 2px 6px; font-size: 0.7rem; color: var(--text-muted); cursor: pointer; white-space: nowrap; }
+copy-button button:hover { background: rgba(0,0,0,0.05); border-color: var(--user-border); color: var(--user-border); }
+copy-button button.copied { background: #e8f5e9; border-color: #4caf50; color: #2e7d32; }
 @media (max-width: 600px) { body { padding: 8px; } .message, .index-item { border-radius: 8px; } .message-content, .index-item-content { padding: 12px; } pre { font-size: 0.8rem; padding: 8px; } #search-box input { width: 120px; } #search-modal[open] { width: 95vw; height: 90vh; } }
 """
 
 JS = """
+class CopyButton extends HTMLElement {
+    constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+    }
+    connectedCallback() {
+        const label = this.getAttribute('label') || 'Copy';
+        const style = document.createElement('style');
+        style.textContent = 'button { background: transparent; border: 1px solid #757575; border-radius: 4px; padding: 2px 6px; font-size: 0.7rem; color: #757575; cursor: pointer; white-space: nowrap; font-family: inherit; } button:hover { background: rgba(0,0,0,0.05); border-color: #1976d2; color: #1976d2; } button.copied { background: #e8f5e9; border-color: #4caf50; color: #2e7d32; }';
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.addEventListener('click', (e) => this.handleClick(e, btn, label));
+        this.shadowRoot.appendChild(style);
+        this.shadowRoot.appendChild(btn);
+    }
+    handleClick(e, btn, label) {
+        e.preventDefault();
+        e.stopPropagation();
+        let content = this.getAttribute('data-content');
+        if (!content) {
+            const selector = this.getAttribute('data-content-from');
+            if (selector) {
+                const el = this.closest('.message, .index-item, .index-commit, .search-result')?.querySelector(selector) || document.querySelector(selector);
+                if (el) content = el.innerText;
+            }
+        }
+        if (content) {
+            navigator.clipboard.writeText(content).then(() => {
+                btn.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => { btn.textContent = label; btn.classList.remove('copied'); }, 2000);
+            });
+        }
+    }
+}
+customElements.define('copy-button', CopyButton);
 document.querySelectorAll('time[data-timestamp]').forEach(function(el) {
     const timestamp = el.getAttribute('data-timestamp');
     const date = new Date(timestamp);
@@ -1293,7 +1380,12 @@ def generate_html(json_path, output_dir, github_repo=None):
         stats_html = _macros.index_stats(tool_stats_str, long_texts_html)
 
         item_html = _macros.index_item(
-            prompt_num, link, conv["timestamp"], rendered_content, stats_html
+            prompt_num,
+            link,
+            conv["timestamp"],
+            rendered_content,
+            stats_html,
+            copy_content=conv["user_text"],
         )
         timeline_items.append((conv["timestamp"], "prompt", item_html))
 
@@ -1708,7 +1800,12 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
         stats_html = _macros.index_stats(tool_stats_str, long_texts_html)
 
         item_html = _macros.index_item(
-            prompt_num, link, conv["timestamp"], rendered_content, stats_html
+            prompt_num,
+            link,
+            conv["timestamp"],
+            rendered_content,
+            stats_html,
+            copy_content=conv["user_text"],
         )
         timeline_items.append((conv["timestamp"], "prompt", item_html))
 
