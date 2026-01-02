@@ -565,6 +565,18 @@ def get_api_headers(token, org_uuid):
     }
 
 
+def refresh_token():
+    """Refresh the Claude API token by running claude -p prompt.
+
+    This triggers Claude Code to refresh the OAuth token stored in the keychain.
+    """
+    subprocess.run(
+        ["claude", "-p", "hi"],
+        capture_output=True,
+        timeout=60,
+    )
+
+
 def fetch_sessions(token, org_uuid):
     """Fetch list of sessions from the API.
 
@@ -1900,6 +1912,9 @@ def web_cmd(
 
     If SESSION_ID is not provided, displays an interactive picker to select a session.
     """
+    # Track if we've already attempted token refresh (to prevent infinite loops)
+    token_refreshed = False
+
     try:
         token, org_uuid = resolve_credentials(token, org_uuid)
     except click.ClickException:
@@ -1910,9 +1925,26 @@ def web_cmd(
         try:
             sessions_data = fetch_sessions(token, org_uuid)
         except httpx.HTTPStatusError as e:
-            raise click.ClickException(
-                f"API request failed: {e.response.status_code} {e.response.text}"
-            )
+            if e.response.status_code == 401 and not token_refreshed:
+                click.echo("Authentication failed, refreshing token...")
+                refresh_token()
+                token_refreshed = True
+                # Re-fetch token from keychain if we auto-detected it
+                new_token = get_access_token_from_keychain()
+                if new_token:
+                    token = new_token
+                try:
+                    sessions_data = fetch_sessions(token, org_uuid)
+                except httpx.HTTPStatusError as e2:
+                    raise click.ClickException(
+                        f"API request failed: {e2.response.status_code} {e2.response.text}"
+                    )
+                except httpx.RequestError as e2:
+                    raise click.ClickException(f"Network error: {e2}")
+            else:
+                raise click.ClickException(
+                    f"API request failed: {e.response.status_code} {e.response.text}"
+                )
         except httpx.RequestError as e:
             raise click.ClickException(f"Network error: {e}")
 
@@ -1948,9 +1980,26 @@ def web_cmd(
     try:
         session_data = fetch_session(token, org_uuid, session_id)
     except httpx.HTTPStatusError as e:
-        raise click.ClickException(
-            f"API request failed: {e.response.status_code} {e.response.text}"
-        )
+        if e.response.status_code == 401 and not token_refreshed:
+            click.echo("Authentication failed, refreshing token...")
+            refresh_token()
+            token_refreshed = True
+            # Re-fetch token from keychain if we auto-detected it
+            new_token = get_access_token_from_keychain()
+            if new_token:
+                token = new_token
+            try:
+                session_data = fetch_session(token, org_uuid, session_id)
+            except httpx.HTTPStatusError as e2:
+                raise click.ClickException(
+                    f"API request failed: {e2.response.status_code} {e2.response.text}"
+                )
+            except httpx.RequestError as e2:
+                raise click.ClickException(f"Network error: {e2}")
+        else:
+            raise click.ClickException(
+                f"API request failed: {e.response.status_code} {e.response.text}"
+            )
     except httpx.RequestError as e:
         raise click.ClickException(f"Network error: {e}")
 

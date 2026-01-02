@@ -1574,3 +1574,218 @@ class TestSearchFeature:
 
         # Total pages should be embedded for JS to know how many pages to fetch
         assert "totalPages" in index_html or "total_pages" in index_html
+
+
+class TestAuthenticationErrorRecovery:
+    """Tests for 401 authentication error recovery in web command."""
+
+    def test_web_retries_after_401_on_fetch_sessions(
+        self, httpx_mock, monkeypatch, output_dir
+    ):
+        """Test that web command retries after 401 error when listing sessions."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+
+        # Load sample session to mock API response
+        fixture_path = Path(__file__).parent / "sample_session.json"
+        with open(fixture_path) as f:
+            session_data = json.load(f)
+
+        # First call to /sessions returns 401, second call succeeds
+        httpx_mock.add_response(
+            url="https://api.anthropic.com/v1/sessions",
+            status_code=401,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Authentication failed",
+                },
+            },
+        )
+        httpx_mock.add_response(
+            url="https://api.anthropic.com/v1/sessions",
+            json={
+                "data": [
+                    {
+                        "id": "test-session-id",
+                        "title": "Test Session",
+                        "created_at": "2025-01-01T00:00:00Z",
+                    }
+                ]
+            },
+        )
+        httpx_mock.add_response(
+            url="https://api.anthropic.com/v1/session_ingress/session/test-session-id",
+            json=session_data,
+        )
+
+        # Track if refresh_token was called
+        refresh_called = []
+
+        def mock_refresh_token():
+            refresh_called.append(True)
+
+        monkeypatch.setattr("claude_code_transcripts.refresh_token", mock_refresh_token)
+
+        # Mock questionary.select to auto-select the first session
+        class MockSelect:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def ask(self):
+                return "test-session-id"
+
+        monkeypatch.setattr("questionary.select", MockSelect)
+
+        runner = CliRunner()
+        # NOTE: No session_id provided, so it will call fetch_sessions first
+        result = runner.invoke(
+            cli,
+            [
+                "web",
+                "--token",
+                "test-token",
+                "--org-uuid",
+                "test-org",
+                "-o",
+                str(output_dir),
+            ],
+        )
+
+        assert result.exit_code == 0, f"Command failed: {result.output}"
+        assert len(refresh_called) == 1, "refresh_token should be called exactly once"
+
+    def test_web_retries_after_401_on_fetch_session(
+        self, httpx_mock, monkeypatch, output_dir
+    ):
+        """Test that web command retries after 401 error when fetching session."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+
+        # Load sample session to mock API response
+        fixture_path = Path(__file__).parent / "sample_session.json"
+        with open(fixture_path) as f:
+            session_data = json.load(f)
+
+        # First call returns 401, second call succeeds
+        httpx_mock.add_response(
+            url="https://api.anthropic.com/v1/session_ingress/session/test-session-id",
+            status_code=401,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Authentication failed",
+                },
+            },
+        )
+        httpx_mock.add_response(
+            url="https://api.anthropic.com/v1/session_ingress/session/test-session-id",
+            json=session_data,
+        )
+
+        # Track if refresh_token was called
+        refresh_called = []
+
+        def mock_refresh_token():
+            refresh_called.append(True)
+
+        monkeypatch.setattr("claude_code_transcripts.refresh_token", mock_refresh_token)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "web",
+                "test-session-id",
+                "--token",
+                "test-token",
+                "--org-uuid",
+                "test-org",
+                "-o",
+                str(output_dir),
+            ],
+        )
+
+        assert result.exit_code == 0, f"Command failed: {result.output}"
+        assert len(refresh_called) == 1, "refresh_token should be called exactly once"
+
+    def test_web_only_retries_once_after_401(self, httpx_mock, monkeypatch, output_dir):
+        """Test that web command only retries once to prevent infinite loops."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+
+        # Both calls return 401 - second 401 should not trigger another retry
+        httpx_mock.add_response(
+            url="https://api.anthropic.com/v1/session_ingress/session/test-session-id",
+            status_code=401,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Authentication failed",
+                },
+            },
+        )
+        httpx_mock.add_response(
+            url="https://api.anthropic.com/v1/session_ingress/session/test-session-id",
+            status_code=401,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Authentication failed",
+                },
+            },
+        )
+
+        # Track if refresh_token was called
+        refresh_called = []
+
+        def mock_refresh_token():
+            refresh_called.append(True)
+
+        monkeypatch.setattr("claude_code_transcripts.refresh_token", mock_refresh_token)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "web",
+                "test-session-id",
+                "--token",
+                "test-token",
+                "--org-uuid",
+                "test-org",
+                "-o",
+                str(output_dir),
+            ],
+        )
+
+        # Should fail after retry fails
+        assert result.exit_code != 0
+        assert "401" in result.output
+        assert len(refresh_called) == 1, "refresh_token should only be called once"
+
+    def test_refresh_token_runs_claude_command(self, monkeypatch):
+        """Test that refresh_token runs claude -p prompt."""
+        from claude_code_transcripts import refresh_token
+        import subprocess
+
+        # Track the command that was run
+        commands_run = []
+
+        def mock_run(cmd, **kwargs):
+            commands_run.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        refresh_token()
+
+        assert len(commands_run) == 1
+        assert commands_run[0][0] == "claude"
+        assert "-p" in commands_run[0]
