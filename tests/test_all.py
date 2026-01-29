@@ -420,6 +420,7 @@ class TestJsonCommandWithUrl:
 
     def test_json_command_accepts_url(self, output_dir):
         """Test that json command can accept a URL starting with http:// or https://."""
+        import json
         from unittest.mock import patch, MagicMock
 
         # Sample JSONL content
@@ -433,6 +434,8 @@ class TestJsonCommandWithUrl:
         mock_response.text = jsonl_content
         mock_response.raise_for_status = MagicMock()
 
+        output_file = output_dir / "output.json"
+
         runner = CliRunner()
         with patch(
             "claude_code_transcripts.httpx.get", return_value=mock_response
@@ -443,7 +446,7 @@ class TestJsonCommandWithUrl:
                     "json",
                     "https://example.com/session.jsonl",
                     "-o",
-                    str(output_dir),
+                    str(output_file),
                 ],
             )
 
@@ -452,12 +455,17 @@ class TestJsonCommandWithUrl:
         call_url = mock_get.call_args[0][0]
         assert call_url == "https://example.com/session.jsonl"
 
-        # Check that HTML was generated
+        # Check that JSON was generated
         assert result.exit_code == 0
-        assert (output_dir / "index.html").exists()
+        assert output_file.exists()
+        with open(output_file) as f:
+            data = json.load(f)
+        assert "metadata" in data
+        assert "conversations" in data
 
     def test_json_command_accepts_http_url(self, output_dir):
         """Test that json command can accept http:// URLs."""
+        import json
         from unittest.mock import patch, MagicMock
 
         jsonl_content = '{"type": "user", "timestamp": "2025-01-01T10:00:00.000Z", "message": {"role": "user", "content": "Hello"}}\n'
@@ -465,6 +473,8 @@ class TestJsonCommandWithUrl:
         mock_response = MagicMock()
         mock_response.text = jsonl_content
         mock_response.raise_for_status = MagicMock()
+
+        output_file = output_dir / "output.json"
 
         runner = CliRunner()
         with patch(
@@ -476,12 +486,15 @@ class TestJsonCommandWithUrl:
                     "json",
                     "http://example.com/session.jsonl",
                     "-o",
-                    str(output_dir),
+                    str(output_file),
                 ],
             )
 
         mock_get.assert_called_once()
         assert result.exit_code == 0
+        with open(output_file) as f:
+            data = json.load(f)
+        assert "conversations" in data
 
     def test_json_command_url_fetch_error(self, output_dir):
         """Test that json command handles URL fetch errors gracefully."""
@@ -508,6 +521,8 @@ class TestJsonCommandWithUrl:
 
     def test_json_command_still_works_with_local_file(self, output_dir):
         """Test that json command still works with local file paths."""
+        import json
+
         # Create a temp JSONL file
         jsonl_file = output_dir / "test.jsonl"
         jsonl_file.write_text(
@@ -515,7 +530,7 @@ class TestJsonCommandWithUrl:
             '{"type": "assistant", "timestamp": "2025-01-01T10:00:05.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi!"}]}}\n'
         )
 
-        html_output = output_dir / "html_output"
+        json_output = output_dir / "output.json"
 
         runner = CliRunner()
         result = runner.invoke(
@@ -524,12 +539,16 @@ class TestJsonCommandWithUrl:
                 "json",
                 str(jsonl_file),
                 "-o",
-                str(html_output),
+                str(json_output),
             ],
         )
 
         assert result.exit_code == 0
-        assert (html_output / "index.html").exists()
+        assert json_output.exists()
+        with open(json_output) as f:
+            data = json.load(f)
+        assert "metadata" in data
+        assert "conversations" in data
 
 
 class TestWebCommandRepoFiltering:

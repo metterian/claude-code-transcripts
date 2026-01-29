@@ -1689,18 +1689,24 @@ def local_cmd(session_file, output, repo, limit, output_json):
     elif output_json:
         click.echo(json.dumps(session_list, indent=2, ensure_ascii=False))
     else:
-        # Output as Rich table
+        # Output as Rich table with row separators for readability
         console = Console()
-        table = Table(show_header=True, header_style="bold")
+        table = Table(
+            show_header=True,
+            header_style="bold magenta",
+            show_lines=True,  # Show lines between rows
+        )
+        table.add_column("#", style="bold yellow", justify="right")
         table.add_column("Path", style="cyan", overflow="fold")
         table.add_column("Summary", style="white", overflow="fold")
         table.add_column("Modified", style="green")
 
-        for session in session_list:
+        for idx, session in enumerate(session_list, 1):
             summary = session["summary"]
             if len(summary) > 80:
                 summary = summary[:80] + "..."
             table.add_row(
+                str(idx),
                 session["path"],
                 summary,
                 session["modified_at"],
