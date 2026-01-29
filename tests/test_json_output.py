@@ -222,8 +222,8 @@ class TestJsonCommand:
 class TestLocalCommand:
     """Tests for the local CLI command with Rich table output."""
 
-    def test_outputs_rich_table_format(self, tmp_path, monkeypatch):
-        """Test that local command outputs Rich table format (not JSON)."""
+    def test_outputs_plain_text_format(self, tmp_path, monkeypatch):
+        """Test that local command outputs plain text format (not JSON)."""
         # Create mock .claude/projects structure
         projects_dir = tmp_path / ".claude" / "projects" / "test-project"
         projects_dir.mkdir(parents=True)
@@ -242,16 +242,18 @@ class TestLocalCommand:
 
         assert result.exit_code == 0
         output = result.output
-        # Should NOT be valid JSON (it's a table)
+        # Should NOT be valid JSON (it's plain text)
         try:
             json.loads(output)
             pytest.fail("Output should not be valid JSON, but it was")
         except json.JSONDecodeError:
-            pass  # Expected - output is a table, not JSON
+            pass  # Expected - output is plain text, not JSON
         # Should NOT contain size_bytes
         assert "size_bytes" not in output
-        # Table should contain unicode box-drawing characters
-        assert "┃" in output or "│" in output or "|" in output
+        # Should contain numbered entries and session info
+        assert "[1]" in output
+        assert "Test session" in output
+        assert "session-123.jsonl" in output
 
     def test_outputs_json_with_json_flag(self, tmp_path, monkeypatch):
         """Test that local --json outputs JSON format."""

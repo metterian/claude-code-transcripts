@@ -18,8 +18,6 @@ import httpx
 from jinja2 import Environment, PackageLoader
 import markdown
 import questionary
-from rich.console import Console
-from rich.table import Table
 
 # Set up Jinja2 environment
 _jinja_env = Environment(
@@ -1689,30 +1687,15 @@ def local_cmd(session_file, output, repo, limit, output_json):
     elif output_json:
         click.echo(json.dumps(session_list, indent=2, ensure_ascii=False))
     else:
-        # Output as Rich table with row separators for readability
-        console = Console()
-        table = Table(
-            show_header=True,
-            header_style="bold magenta",
-            show_lines=True,  # Show lines between rows
-        )
-        table.add_column("#", style="bold yellow", justify="right")
-        table.add_column("Path", style="cyan", overflow="fold")
-        table.add_column("Summary", style="white", overflow="fold")
-        table.add_column("Modified", style="green")
-
+        # Plain text output for easy copy-paste
         for idx, session in enumerate(session_list, 1):
             summary = session["summary"]
             if len(summary) > 80:
                 summary = summary[:80] + "..."
-            table.add_row(
-                str(idx),
-                session["path"],
-                summary,
-                session["modified_at"],
-            )
-
-        console.print(table)
+            click.echo(f"[{idx}] {session['modified_at']}")
+            click.echo(f"    {summary}")
+            click.echo(f"    {session['path']}")
+            click.echo()
 
 
 def is_url(path):
