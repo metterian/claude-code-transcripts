@@ -18,6 +18,8 @@ import httpx
 from jinja2 import Environment, PackageLoader
 import markdown
 import questionary
+from rich.console import Console
+from rich.table import Table
 
 # Set up Jinja2 environment
 _jinja_env = Environment(
@@ -906,6 +908,129 @@ def analyze_conversation(messages):
     }
 
 
+def generate_json_output(json_path, github_repo=None):
+    """Generate JSON output from a session file.
+
+    Args:
+        json_path: Path to the session file (JSON or JSONL)
+        github_repo: Optional GitHub repo (owner/name) for commit links
+
+    Returns:
+        Dict with metadata, stats, conversations, and commits
+    """
+    from datetime import datetime, timezone
+
+    json_path = Path(json_path)
+    data = parse_session_file(json_path)
+    loglines = data.get("loglines", [])
+
+    # Auto-detect GitHub repo if not provided
+    if github_repo is None:
+        github_repo = detect_github_repo(loglines)
+
+    # Build conversations from loglines
+    conversations = []
+    current_conv = None
+    for entry in loglines:
+        log_type = entry.get("type")
+        timestamp = entry.get("timestamp", "")
+        is_compact_summary = entry.get("isCompactSummary", False)
+        message_data = entry.get("message", {})
+        if not message_data:
+            continue
+
+        # Determine if this is a user prompt
+        is_user_prompt = False
+        user_text = None
+        if log_type == "user":
+            content = message_data.get("content", "")
+            text = extract_text_from_content(content)
+            if text:
+                is_user_prompt = True
+                user_text = text
+
+        if is_user_prompt:
+            if current_conv:
+                conversations.append(current_conv)
+            current_conv = {
+                "user_text": user_text,
+                "timestamp": timestamp,
+                "is_continuation": bool(is_compact_summary),
+                "messages": [],
+            }
+
+        # Add message to current conversation
+        if current_conv:
+            current_conv["messages"].append(
+                {
+                    "type": log_type,
+                    "timestamp": timestamp,
+                    "content": message_data,
+                }
+            )
+
+    if current_conv:
+        conversations.append(current_conv)
+
+    # Calculate stats for each conversation and overall
+    total_tool_counts = {}
+    total_messages = 0
+    all_commits = []  # list of dicts with hash, message, timestamp, conversation_index
+
+    for conv_idx, conv in enumerate(conversations):
+        # Build messages in format expected by analyze_conversation
+        messages_for_analysis = [
+            (msg["type"], json.dumps(msg["content"]), msg["timestamp"])
+            for msg in conv["messages"]
+        ]
+        stats = analyze_conversation(messages_for_analysis)
+
+        # Add stats to conversation
+        conv["stats"] = {
+            "tool_counts": stats["tool_counts"],
+            "commits": [
+                {"hash": h, "message": m, "timestamp": t}
+                for h, m, t in stats["commits"]
+            ],
+            "long_texts": stats["long_texts"],
+        }
+
+        # Aggregate overall stats
+        total_messages += len(conv["messages"])
+        for tool, count in stats["tool_counts"].items():
+            total_tool_counts[tool] = total_tool_counts.get(tool, 0) + count
+        for commit_hash, commit_msg, commit_ts in stats["commits"]:
+            all_commits.append(
+                {
+                    "hash": commit_hash,
+                    "message": commit_msg,
+                    "timestamp": commit_ts,
+                    "conversation_index": conv_idx,
+                }
+            )
+
+    # Count prompts (non-continuation conversations)
+    total_prompts = sum(1 for c in conversations if not c.get("is_continuation"))
+
+    return {
+        "metadata": {
+            "github_repo": github_repo,
+            "generated_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        },
+        "stats": {
+            "total_prompts": total_prompts,
+            "total_messages": total_messages,
+            "total_tool_calls": sum(total_tool_counts.values()),
+            "total_commits": len(all_commits),
+            "tool_counts": total_tool_counts,
+        },
+        "conversations": conversations,
+        "commits": all_commits,
+    }
+
+
 def format_tool_stats(tool_counts):
     """Format tool counts into a concise summary string."""
     if not tool_counts:
@@ -1478,120 +1603,110 @@ def cli():
 
 
 @cli.command("local")
+@click.argument("session_file", type=click.Path(), required=False)
 @click.option(
     "-o",
     "--output",
     type=click.Path(),
-    help="Output directory. If not specified, writes to temp dir and opens in browser.",
-)
-@click.option(
-    "-a",
-    "--output-auto",
-    is_flag=True,
-    help="Auto-name output subdirectory based on session filename (uses -o as parent, or current dir).",
+    help="Output JSON file path. If not specified, outputs to stdout.",
 )
 @click.option(
     "--repo",
     help="GitHub repo (owner/name) for commit links. Auto-detected from git push output if not specified.",
 )
 @click.option(
-    "--gist",
-    is_flag=True,
-    help="Upload to GitHub Gist and output a gisthost.github.io URL.",
+    "--limit",
+    default=10,
+    help="Maximum number of sessions to list (default: 10). Only used when no SESSION_FILE is given.",
 )
 @click.option(
     "--json",
-    "include_json",
+    "output_json",
     is_flag=True,
-    help="Include the original JSONL session file in the output directory.",
+    help="Output as JSON instead of table format.",
 )
-@click.option(
-    "--open",
-    "open_browser",
-    is_flag=True,
-    help="Open the generated index.html in your default browser (default if no -o specified).",
-)
-@click.option(
-    "--limit",
-    default=10,
-    help="Maximum number of sessions to show (default: 10)",
-)
-def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit):
-    """Select and convert a local Claude Code session to HTML."""
+def local_cmd(session_file, output, repo, limit, output_json):
+    """List local Claude Code sessions or convert a specific session to JSON.
+
+    If SESSION_FILE is provided, outputs the session as JSON.
+    If no SESSION_FILE is provided, displays a table of available sessions.
+    """
+    # If session file is provided, convert it to JSON
+    if session_file:
+        session_path = Path(session_file)
+        if not session_path.exists():
+            raise click.ClickException(f"File not found: {session_file}")
+
+        # Generate JSON output
+        result = generate_json_output(session_path, github_repo=repo)
+
+        # Output to file or stdout
+        if output:
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            click.echo(f"Output: {output_path.resolve()}", err=True)
+        else:
+            click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+
+    # No session file - list available sessions
     projects_folder = Path.home() / ".claude" / "projects"
 
     if not projects_folder.exists():
-        click.echo(f"Projects folder not found: {projects_folder}")
-        click.echo("No local Claude Code sessions available.")
+        if output_json or output:
+            click.echo(json.dumps([]))
         return
 
-    click.echo("Loading local sessions...")
     results = find_local_sessions(projects_folder, limit=limit)
 
     if not results:
-        click.echo("No local sessions found.")
+        if output_json or output:
+            click.echo(json.dumps([]))
         return
 
-    # Build choices for questionary
-    choices = []
+    # Build session list
+    session_list = []
     for filepath, summary in results:
         stat = filepath.stat()
         mod_time = datetime.fromtimestamp(stat.st_mtime)
-        size_kb = stat.st_size / 1024
-        date_str = mod_time.strftime("%Y-%m-%d %H:%M")
-        # Truncate summary if too long
-        if len(summary) > 50:
-            summary = summary[:47] + "..."
-        display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
-        choices.append(questionary.Choice(title=display, value=filepath))
+        session_list.append(
+            {
+                "path": str(filepath),
+                "summary": summary,
+                "modified_at": mod_time.isoformat(),
+            }
+        )
 
-    selected = questionary.select(
-        "Select a session to convert:",
-        choices=choices,
-    ).ask()
+    # Output to file or JSON stdout
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(session_list, f, indent=2, ensure_ascii=False)
+        click.echo(f"Output: {output_path.resolve()}", err=True)
+    elif output_json:
+        click.echo(json.dumps(session_list, indent=2, ensure_ascii=False))
+    else:
+        # Output as Rich table
+        console = Console()
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Path", style="cyan", overflow="fold")
+        table.add_column("Summary", style="white", overflow="fold")
+        table.add_column("Modified", style="green")
 
-    if selected is None:
-        click.echo("No session selected.")
-        return
+        for session in session_list:
+            summary = session["summary"]
+            if len(summary) > 80:
+                summary = summary[:80] + "..."
+            table.add_row(
+                session["path"],
+                summary,
+                session["modified_at"],
+            )
 
-    session_file = selected
-
-    # Determine output directory and whether to open browser
-    # If no -o specified, use temp dir and open browser by default
-    auto_open = output is None and not gist and not output_auto
-    if output_auto:
-        # Use -o as parent dir (or current dir), with auto-named subdirectory
-        parent_dir = Path(output) if output else Path(".")
-        output = parent_dir / session_file.stem
-    elif output is None:
-        output = Path(tempfile.gettempdir()) / f"claude-session-{session_file.stem}"
-
-    output = Path(output)
-    generate_html(session_file, output, github_repo=repo)
-
-    # Show output directory
-    click.echo(f"Output: {output.resolve()}")
-
-    # Copy JSONL file to output directory if requested
-    if include_json:
-        output.mkdir(exist_ok=True)
-        json_dest = output / session_file.name
-        shutil.copy(session_file, json_dest)
-        json_size_kb = json_dest.stat().st_size / 1024
-        click.echo(f"JSONL: {json_dest} ({json_size_kb:.1f} KB)")
-
-    if gist:
-        # Inject gist preview JS and create gist
-        inject_gist_preview_js(output)
-        click.echo("Creating GitHub gist...")
-        gist_id, gist_url = create_gist(output)
-        preview_url = f"https://gisthost.github.io/?{gist_id}/index.html"
-        click.echo(f"Gist: {gist_url}")
-        click.echo(f"Preview: {preview_url}")
-
-    if open_browser or auto_open:
-        index_url = (output / "index.html").resolve().as_uri()
-        webbrowser.open(index_url)
+        console.print(table)
 
 
 def is_url(path):
@@ -1639,90 +1754,37 @@ def fetch_url_to_tempfile(url):
     "-o",
     "--output",
     type=click.Path(),
-    help="Output directory. If not specified, writes to temp dir and opens in browser.",
-)
-@click.option(
-    "-a",
-    "--output-auto",
-    is_flag=True,
-    help="Auto-name output subdirectory based on filename (uses -o as parent, or current dir).",
+    help="Output JSON file path. If not specified, outputs to stdout.",
 )
 @click.option(
     "--repo",
     help="GitHub repo (owner/name) for commit links. Auto-detected from git push output if not specified.",
 )
-@click.option(
-    "--gist",
-    is_flag=True,
-    help="Upload to GitHub Gist and output a gisthost.github.io URL.",
-)
-@click.option(
-    "--json",
-    "include_json",
-    is_flag=True,
-    help="Include the original JSON session file in the output directory.",
-)
-@click.option(
-    "--open",
-    "open_browser",
-    is_flag=True,
-    help="Open the generated index.html in your default browser (default if no -o specified).",
-)
-def json_cmd(json_file, output, output_auto, repo, gist, include_json, open_browser):
-    """Convert a Claude Code session JSON/JSONL file or URL to HTML."""
+def json_cmd(json_file, output, repo):
+    """Convert a Claude Code session JSON/JSONL file or URL to JSON output."""
     # Handle URL input
     if is_url(json_file):
-        click.echo(f"Fetching {json_file}...")
+        click.echo(f"Fetching {json_file}...", err=True)
         temp_file = fetch_url_to_tempfile(json_file)
         json_file_path = temp_file
-        # Use URL path for naming
-        url_name = Path(json_file.split("?")[0]).stem or "session"
     else:
         # Validate that local file exists
         json_file_path = Path(json_file)
         if not json_file_path.exists():
             raise click.ClickException(f"File not found: {json_file}")
-        url_name = None
 
-    # Determine output directory and whether to open browser
-    # If no -o specified, use temp dir and open browser by default
-    auto_open = output is None and not gist and not output_auto
-    if output_auto:
-        # Use -o as parent dir (or current dir), with auto-named subdirectory
-        parent_dir = Path(output) if output else Path(".")
-        output = parent_dir / (url_name or json_file_path.stem)
-    elif output is None:
-        output = (
-            Path(tempfile.gettempdir())
-            / f"claude-session-{url_name or json_file_path.stem}"
-        )
+    # Generate JSON output
+    result = generate_json_output(json_file_path, github_repo=repo)
 
-    output = Path(output)
-    generate_html(json_file_path, output, github_repo=repo)
-
-    # Show output directory
-    click.echo(f"Output: {output.resolve()}")
-
-    # Copy JSON file to output directory if requested
-    if include_json:
-        output.mkdir(exist_ok=True)
-        json_dest = output / json_file_path.name
-        shutil.copy(json_file_path, json_dest)
-        json_size_kb = json_dest.stat().st_size / 1024
-        click.echo(f"JSON: {json_dest} ({json_size_kb:.1f} KB)")
-
-    if gist:
-        # Inject gist preview JS and create gist
-        inject_gist_preview_js(output)
-        click.echo("Creating GitHub gist...")
-        gist_id, gist_url = create_gist(output)
-        preview_url = f"https://gisthost.github.io/?{gist_id}/index.html"
-        click.echo(f"Gist: {gist_url}")
-        click.echo(f"Preview: {preview_url}")
-
-    if open_browser or auto_open:
-        index_url = (output / "index.html").resolve().as_uri()
-        webbrowser.open(index_url)
+    # Output to file or stdout
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+        click.echo(f"Output: {output_path.resolve()}", err=True)
+    else:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def resolve_credentials(token, org_uuid):
@@ -1944,19 +2006,134 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     )
 
 
+def generate_json_output_from_session_data(session_data, github_repo=None):
+    """Generate JSON output from session data dict.
+
+    Args:
+        session_data: Session data dict with 'loglines' key
+        github_repo: Optional GitHub repo (owner/name) for commit links
+
+    Returns:
+        Dict with metadata, stats, conversations, and commits
+    """
+    from datetime import datetime, timezone
+
+    loglines = session_data.get("loglines", [])
+
+    # Auto-detect GitHub repo if not provided
+    if github_repo is None:
+        github_repo = detect_github_repo(loglines)
+
+    # Build conversations from loglines
+    conversations = []
+    current_conv = None
+    for entry in loglines:
+        log_type = entry.get("type")
+        timestamp = entry.get("timestamp", "")
+        is_compact_summary = entry.get("isCompactSummary", False)
+        message_data = entry.get("message", {})
+        if not message_data:
+            continue
+
+        # Determine if this is a user prompt
+        is_user_prompt = False
+        user_text = None
+        if log_type == "user":
+            content = message_data.get("content", "")
+            text = extract_text_from_content(content)
+            if text:
+                is_user_prompt = True
+                user_text = text
+
+        if is_user_prompt:
+            if current_conv:
+                conversations.append(current_conv)
+            current_conv = {
+                "user_text": user_text,
+                "timestamp": timestamp,
+                "is_continuation": bool(is_compact_summary),
+                "messages": [],
+            }
+
+        # Add message to current conversation
+        if current_conv:
+            current_conv["messages"].append(
+                {
+                    "type": log_type,
+                    "timestamp": timestamp,
+                    "content": message_data,
+                }
+            )
+
+    if current_conv:
+        conversations.append(current_conv)
+
+    # Calculate stats for each conversation and overall
+    total_tool_counts = {}
+    total_messages = 0
+    all_commits = []
+
+    for conv_idx, conv in enumerate(conversations):
+        # Build messages in format expected by analyze_conversation
+        messages_for_analysis = [
+            (msg["type"], json.dumps(msg["content"]), msg["timestamp"])
+            for msg in conv["messages"]
+        ]
+        stats = analyze_conversation(messages_for_analysis)
+
+        # Add stats to conversation
+        conv["stats"] = {
+            "tool_counts": stats["tool_counts"],
+            "commits": [
+                {"hash": h, "message": m, "timestamp": t}
+                for h, m, t in stats["commits"]
+            ],
+            "long_texts": stats["long_texts"],
+        }
+
+        # Aggregate overall stats
+        total_messages += len(conv["messages"])
+        for tool, count in stats["tool_counts"].items():
+            total_tool_counts[tool] = total_tool_counts.get(tool, 0) + count
+        for commit_hash, commit_msg, commit_ts in stats["commits"]:
+            all_commits.append(
+                {
+                    "hash": commit_hash,
+                    "message": commit_msg,
+                    "timestamp": commit_ts,
+                    "conversation_index": conv_idx,
+                }
+            )
+
+    # Count prompts (non-continuation conversations)
+    total_prompts = sum(1 for c in conversations if not c.get("is_continuation"))
+
+    return {
+        "metadata": {
+            "github_repo": github_repo,
+            "generated_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        },
+        "stats": {
+            "total_prompts": total_prompts,
+            "total_messages": total_messages,
+            "total_tool_calls": sum(total_tool_counts.values()),
+            "total_commits": len(all_commits),
+            "tool_counts": total_tool_counts,
+        },
+        "conversations": conversations,
+        "commits": all_commits,
+    }
+
+
 @cli.command("web")
-@click.argument("session_id", required=False)
+@click.argument("session_id", required=True)
 @click.option(
     "-o",
     "--output",
     type=click.Path(),
-    help="Output directory. If not specified, writes to temp dir and opens in browser.",
-)
-@click.option(
-    "-a",
-    "--output-auto",
-    is_flag=True,
-    help="Auto-name output subdirectory based on session ID (uses -o as parent, or current dir).",
+    help="Output JSON file path. If not specified, outputs to stdout.",
 )
 @click.option("--token", help="API access token (auto-detected from keychain on macOS)")
 @click.option(
@@ -1964,89 +2141,20 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
 )
 @click.option(
     "--repo",
-    help="GitHub repo (owner/name). Filters session list and sets default for commit links.",
+    help="GitHub repo (owner/name) for commit links.",
 )
-@click.option(
-    "--gist",
-    is_flag=True,
-    help="Upload to GitHub Gist and output a gisthost.github.io URL.",
-)
-@click.option(
-    "--json",
-    "include_json",
-    is_flag=True,
-    help="Include the JSON session data in the output directory.",
-)
-@click.option(
-    "--open",
-    "open_browser",
-    is_flag=True,
-    help="Open the generated index.html in your default browser (default if no -o specified).",
-)
-def web_cmd(
-    session_id,
-    output,
-    output_auto,
-    token,
-    org_uuid,
-    repo,
-    gist,
-    include_json,
-    open_browser,
-):
-    """Select and convert a web session from the Claude API to HTML.
+def web_cmd(session_id, output, token, org_uuid, repo):
+    """Fetch and convert a web session from the Claude API to JSON.
 
-    If SESSION_ID is not provided, displays an interactive picker to select a session.
+    SESSION_ID is the session ID to fetch from the API.
     """
     try:
         token, org_uuid = resolve_credentials(token, org_uuid)
     except click.ClickException:
         raise
 
-    # If no session ID provided, show interactive picker
-    if session_id is None:
-        try:
-            sessions_data = fetch_sessions(token, org_uuid)
-        except httpx.HTTPStatusError as e:
-            raise click.ClickException(
-                f"API request failed: {e.response.status_code} {e.response.text}"
-            )
-        except httpx.RequestError as e:
-            raise click.ClickException(f"Network error: {e}")
-
-        sessions = sessions_data.get("data", [])
-        if not sessions:
-            raise click.ClickException("No sessions found.")
-
-        # Enrich sessions with repo information (extracted from session metadata)
-        sessions = enrich_sessions_with_repos(sessions)
-
-        # Filter by repo if specified
-        if repo:
-            sessions = filter_sessions_by_repo(sessions, repo)
-            if not sessions:
-                raise click.ClickException(f"No sessions found for repo: {repo}")
-
-        # Build choices for questionary
-        choices = []
-        for s in sessions:
-            sid = s.get("id", "unknown")
-            display = format_session_for_display(s)
-            choices.append(questionary.Choice(title=display, value=sid))
-
-        selected = questionary.select(
-            "Select a session to import:",
-            choices=choices,
-        ).ask()
-
-        if selected is None:
-            # User cancelled
-            raise click.ClickException("No session selected.")
-
-        session_id = selected
-
     # Fetch the session
-    click.echo(f"Fetching session {session_id}...")
+    click.echo(f"Fetching session {session_id}...", err=True)
     try:
         session_data = fetch_session(token, org_uuid, session_id)
     except httpx.HTTPStatusError as e:
@@ -2056,44 +2164,18 @@ def web_cmd(
     except httpx.RequestError as e:
         raise click.ClickException(f"Network error: {e}")
 
-    # Determine output directory and whether to open browser
-    # If no -o specified, use temp dir and open browser by default
-    auto_open = output is None and not gist and not output_auto
-    if output_auto:
-        # Use -o as parent dir (or current dir), with auto-named subdirectory
-        parent_dir = Path(output) if output else Path(".")
-        output = parent_dir / session_id
-    elif output is None:
-        output = Path(tempfile.gettempdir()) / f"claude-session-{session_id}"
+    # Generate JSON output
+    result = generate_json_output_from_session_data(session_data, github_repo=repo)
 
-    output = Path(output)
-    click.echo(f"Generating HTML in {output}/...")
-    generate_html_from_session_data(session_data, output, github_repo=repo)
-
-    # Show output directory
-    click.echo(f"Output: {output.resolve()}")
-
-    # Save JSON session data if requested
-    if include_json:
-        output.mkdir(exist_ok=True)
-        json_dest = output / f"{session_id}.json"
-        with open(json_dest, "w") as f:
-            json.dump(session_data, f, indent=2)
-        json_size_kb = json_dest.stat().st_size / 1024
-        click.echo(f"JSON: {json_dest} ({json_size_kb:.1f} KB)")
-
-    if gist:
-        # Inject gist preview JS and create gist
-        inject_gist_preview_js(output)
-        click.echo("Creating GitHub gist...")
-        gist_id, gist_url = create_gist(output)
-        preview_url = f"https://gisthost.github.io/?{gist_id}/index.html"
-        click.echo(f"Gist: {gist_url}")
-        click.echo(f"Preview: {preview_url}")
-
-    if open_browser or auto_open:
-        index_url = (output / "index.html").resolve().as_uri()
-        webbrowser.open(index_url)
+    # Output to file or stdout
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+        click.echo(f"Output: {output_path.resolve()}", err=True)
+    else:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 @cli.command("all")
